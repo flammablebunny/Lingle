@@ -712,7 +712,8 @@ public class PackageInstaller {
                 case "dnf" -> {
                     Path rpmFile = buildDir.resolve("waywall-0.5-1.fc42.x86_64.rpm");
                     if (Files.exists(rpmFile)) {
-                        installPackageCmd = "dnf localinstall -y " + rpmFile;
+                        // Use 'install' instead of 'localinstall' for dnf5 compatibility
+                        installPackageCmd = "dnf install -y " + rpmFile;
                         LingleLogger.logInfo("Found package: " + rpmFile);
                     } else {
                         LingleLogger.logError("Package not found: " + rpmFile);
