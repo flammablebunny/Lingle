@@ -14,6 +14,7 @@ public class ElevatedInstaller {
     private static Boolean useSudo = null;
     private static Thread sudoKeepAliveThread = null;
     private static volatile boolean keepAliveShouldRun = false;
+    private static volatile boolean authenticationFailed = false;
 
     private static void startSudoKeepAlive() {
         if (sudoKeepAliveThread != null && sudoKeepAliveThread.isAlive()) {
@@ -70,18 +71,43 @@ public class ElevatedInstaller {
         }
     }
 
+    private static boolean isRunningInTerminal() {
+        // Check if we have a console (running in terminal)
+        return System.console() != null;
+    }
+
+    private static boolean isSudoAvailable() {
+        try {
+            Process p = new ProcessBuilder("which", "sudo").start();
+            return p.waitFor() == 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private static void ensureRootShell() throws IOException {
         synchronized (SHELL_LOCK) {
+            // If authentication previously failed, don't retry - prevents multiple prompts
+            if (authenticationFailed) {
+                throw new IOException("Authentication was previously cancelled or failed");
+            }
+
             if (rootShellProcess != null && rootShellProcess.isAlive()) return;
 
             // Determine elevation method on first use
             if (useSudo == null) {
-                useSudo = !isPolkitAgentAvailable();
-                if (useSudo) {
+                // Prefer sudo when running in a terminal (pkexec has issues with terminal stdin)
+                // Only use pkexec for graphical environments with a polkit agent
+                if (isRunningInTerminal() && isSudoAvailable()) {
+                    useSudo = true;
+                    LingleLogger.logInfo("Running in terminal, using sudo for authentication");
+                } else if (isPolkitAgentAvailable()) {
+                    useSudo = false;
+                    LingleLogger.logInfo("Polkit agent detected, using pkexec for authentication");
+                } else {
+                    useSudo = true;
                     LingleLogger.logInfo("No polkit agent detected, using sudo for authentication");
                     System.out.println("\n[Lingle] No polkit agent detected. Authenticating with sudo...");
-                } else {
-                    LingleLogger.logInfo("Polkit agent detected, using pkexec for authentication");
                 }
             }
 
@@ -95,6 +121,7 @@ public class ElevatedInstaller {
                     int authResult = authProc.waitFor();
                     if (authResult != 0) {
                         LingleLogger.logError("sudo authentication failed");
+                        authenticationFailed = true;
                         throw new IOException("sudo authentication failed");
                     }
                     LingleLogger.logInfo("sudo authentication successful");
@@ -136,6 +163,8 @@ public class ElevatedInstaller {
                 // Check if process is still alive (authentication might have been cancelled)
                 if (!rootShellProcess.isAlive()) {
                     LingleLogger.logError("Elevated shell process died immediately - authentication may have failed");
+                    authenticationFailed = true;
+                    rootShellProcess = null;
                     throw new IOException("Failed to start elevated shell - authentication failed or was cancelled");
                 }
 
@@ -149,6 +178,8 @@ public class ElevatedInstaller {
                 while (System.currentTimeMillis() - startTime < timeoutMs) {
                     if (!rootShellProcess.isAlive()) {
                         LingleLogger.logError("Elevated shell process died during initialization");
+                        authenticationFailed = true;
+                        rootShellProcess = null;
                         throw new IOException("Elevated shell process died - authentication may have failed");
                     }
 
@@ -166,6 +197,8 @@ public class ElevatedInstaller {
 
                 if (!ready) {
                     LingleLogger.logError("Elevated shell did not respond within timeout");
+                    authenticationFailed = true;
+                    rootShellProcess = null;
                     throw new IOException("Elevated shell did not respond - authentication may have failed");
                 }
 
@@ -283,14 +316,23 @@ public class ElevatedInstaller {
 
 
     public static int runElevated(String... command) throws IOException, InterruptedException {
+        // If authentication previously failed, don't retry
+        if (authenticationFailed) {
+            throw new IOException("Authentication was previously cancelled or failed");
+        }
+
         // Determine elevation method if not already done
         if (useSudo == null) {
-            useSudo = !isPolkitAgentAvailable();
-            if (useSudo) {
+            if (isRunningInTerminal() && isSudoAvailable()) {
+                useSudo = true;
+                LingleLogger.logInfo("Running in terminal, using sudo for authentication");
+            } else if (isPolkitAgentAvailable()) {
+                useSudo = false;
+                LingleLogger.logInfo("Polkit agent detected, using pkexec for authentication");
+            } else {
+                useSudo = true;
                 LingleLogger.logInfo("No polkit agent detected, using sudo for authentication");
                 System.out.println("\n[Lingle] No polkit agent detected. You will be prompted for your password.");
-            } else {
-                LingleLogger.logInfo("Polkit agent detected, using pkexec for authentication");
             }
         }
 

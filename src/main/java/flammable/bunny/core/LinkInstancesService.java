@@ -118,17 +118,20 @@ public class LinkInstancesService {
                     WantedBy=multi-user.target
                     """.formatted(username, script.toString());
 
-            // Write service file to /etc/systemd/system/ using pkexe
+            // Write service file to temp location first, then copy with elevated permissions
+            // This avoids heredoc issues with the elevated bash wrapper
             String serviceFilePath = "/etc/systemd/system/lingle-startup.service";
-            String createServiceCmd = String.format(
-                    "cat > %s << 'EOF'\n%sEOF\n",
+            Path tempServiceFile = scriptsDir.resolve("lingle-startup.service.tmp");
+            Files.writeString(tempServiceFile, service, StandardCharsets.UTF_8);
+
+            String copyCmd = String.format("cp '%s' '%s' && rm '%s'",
+                    tempServiceFile.toString(),
                     serviceFilePath,
-                    service
-            );
+                    tempServiceFile.toString());
 
             LingleLogger.logInfo("Creating system service at " + serviceFilePath);
-            LingleLogger.logCommand(createServiceCmd);
-            int writeExitCode = ElevatedInstaller.runElevatedBash(createServiceCmd);
+            LingleLogger.logCommand(copyCmd);
+            int writeExitCode = ElevatedInstaller.runElevatedBash(copyCmd);
             if (writeExitCode != 0) {
                 LingleLogger.logError("Failed to create service file, exit code: " + writeExitCode);
                 UIUtils.showDarkMessage(parent, "Error", "Failed to create service file (exit code: " + writeExitCode + ")");
