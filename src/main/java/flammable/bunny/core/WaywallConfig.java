@@ -15,14 +15,29 @@ public class WaywallConfig {
     private static final Path CONFIG_FILE = CONFIG_DIR.resolve("config.lua");
     private static final Path REMAPS = CONFIG_DIR.resolve("remaps.lua");
 
+    /**
+     * Detects if the config is "generic" format (has config.lua) or "barebones" format (init.lua only)
+     */
+    public static boolean isGenericConfig() {
+        return Files.exists(CONFIG_FILE);
+    }
+
+    /**
+     * Gets the file to edit for keybinds/toggles based on config format
+     */
+    private static Path getEditableFile() {
+        return isGenericConfig() ? CONFIG_FILE : INIT_FILE;
+    }
+
     private static Pattern togglePattern(String key) {
         return Pattern.compile("(?m)^(\\s*local\\s+" + Pattern.quote(key) + "\\s*=\\s*)(true|false)(\\s*,?\\s*)$");
     }
 
     public static boolean getToggle(String key, boolean def) {
         try {
-            if (!Files.exists(CONFIG_FILE)) return def;
-            String s = Files.readString(CONFIG_FILE);
+            Path file = getEditableFile();
+            if (!Files.exists(file)) return def;
+            String s = Files.readString(file);
             Matcher m = togglePattern(key).matcher(s);
             if (m.find()) {
                 return Boolean.parseBoolean(m.group(2));
@@ -33,33 +48,46 @@ public class WaywallConfig {
 
     public static void setToggle(String key, boolean value) throws IOException {
         Files.createDirectories(CONFIG_DIR);
-        String content = Files.exists(CONFIG_FILE) ? Files.readString(CONFIG_FILE) : "";
+        Path file = getEditableFile();
+        String content = Files.exists(file) ? Files.readString(file) : "";
         Matcher m = togglePattern(key).matcher(content);
         String replacement = "$1" + (value ? "true" : "false") + "$3";
         String updated;
         if (m.find()) {
             updated = m.replaceAll(replacement);
         } else {
-            // Need to add both the variable definition and the export entry
-            // 1. Add variable definition before the export section
+            // Add variable definition
             String varDef = "local " + key + " = " + (value ? "true" : "false") + "\n";
-            Pattern beforeExport = Pattern.compile("(?m)(\\n-- ======== EXPORT ========\\n)");
-            Matcher m2 = beforeExport.matcher(content);
-            if (m2.find()) {
-                updated = m2.replaceFirst(varDef + "$1");
-            } else {
-                updated = content + (content.endsWith("\n") ? "" : "\n") + varDef;
-            }
 
-            // 2. Add to export table (before the closing brace)
-            String exportEntry = "    " + key + " = " + key + ",\n";
-            Pattern beforeClosingBrace = Pattern.compile("(?m)(\\n\\}\\n*$)");
-            Matcher m3 = beforeClosingBrace.matcher(updated);
-            if (m3.find()) {
-                updated = m3.replaceFirst(exportEntry + "$1");
+            if (isGenericConfig()) {
+                // Generic format: add before export section
+                Pattern beforeExport = Pattern.compile("(?m)(\\n-- ======== EXPORT ========\\n)");
+                Matcher m2 = beforeExport.matcher(content);
+                if (m2.find()) {
+                    updated = m2.replaceFirst(varDef + "$1");
+                } else {
+                    updated = content + (content.endsWith("\n") ? "" : "\n") + varDef;
+                }
+
+                // Add to export table
+                String exportEntry = "    " + key + " = " + key + ",\n";
+                Pattern beforeClosingBrace = Pattern.compile("(?m)(\\n\\}\\n*$)");
+                Matcher m3 = beforeClosingBrace.matcher(updated);
+                if (m3.find()) {
+                    updated = m3.replaceFirst(exportEntry + "$1");
+                }
+            } else {
+                // Barebones format: add after imports section
+                Pattern afterImports = Pattern.compile("(?m)(local helpers = require.*?\\n)");
+                Matcher m2 = afterImports.matcher(content);
+                if (m2.find()) {
+                    updated = m2.replaceFirst("$1\n" + varDef);
+                } else {
+                    updated = content + (content.endsWith("\n") ? "" : "\n") + varDef;
+                }
             }
         }
-        Files.writeString(CONFIG_FILE, updated, StandardCharsets.UTF_8);
+        Files.writeString(file, updated, StandardCharsets.UTF_8);
     }
 
     public static Map<String, String> readPaths() {
@@ -68,47 +96,90 @@ public class WaywallConfig {
             if (!Files.exists(INIT_FILE)) return out;
             String s = Files.readString(INIT_FILE);
 
-            // Pattern to match variables in init.lua like: local pacem_path = waywall_config_path .. "resources/paceman.jar"
-            Pattern pathPattern = Pattern.compile("(?m)^\\s*local\\s+(pacem_path|nb_path|overlay_path|lingle_path)\\s*=\\s*waywall_config_path\\s*\\.\\.\\s*\"([^\"]+)\"");
-            Matcher m = pathPattern.matcher(s);
-            while (m.find()) {
-                String var = m.group(1);
-                String path = m.group(2);
-                out.put(var, path);
+            // Generic format: local pacem_path = waywall_config_path .. "resources/paceman.jar"
+            Pattern genericPattern = Pattern.compile("(?m)^\\s*local\\s+(pacem_path|nb_path|overlay_path|lingle_path|bg_path)\\s*=\\s*waywall_config_path\\s*\\.\\.\\s*\"([^\"]+)\"");
+            Matcher m1 = genericPattern.matcher(s);
+            while (m1.find()) {
+                out.put(m1.group(1), m1.group(2));
             }
+
+            // Barebones format: local pacem_path = home_path .. "Downloads/paceman.jar"
+            Pattern barebonesPattern = Pattern.compile("(?m)^\\s*local\\s+(pacem_path|nb_path|overlay_path|lingle_path|bg_path)\\s*=\\s*home_path\\s*\\.\\.\\s*\"([^\"]+)\"");
+            Matcher m2 = barebonesPattern.matcher(s);
+            while (m2.find()) {
+                out.put(m2.group(1), "/" + m2.group(2)); // Prefix with / for home-relative
+            }
+
+            // Also match os.getenv("HOME") pattern
+            Pattern osEnvPattern = Pattern.compile("(?m)^\\s*local\\s+(pacem_path|nb_path|overlay_path|lingle_path|bg_path)\\s*=\\s*os\\.getenv\\(\"HOME\"\\)\\s*\\.\\.\\s*\"([^\"]+)\"");
+            Matcher m3 = osEnvPattern.matcher(s);
+            while (m3.find()) {
+                out.put(m3.group(1), m3.group(2));
+            }
+
         } catch (IOException ignored) {}
         return out;
     }
 
     public static void setPathVar(String varName, String homeRelative) throws IOException {
-        if (!"lingle_path".equals(varName)) {
-            // Only lingle_path should be edited in init.lua, others are fixed
-            return;
-        }
-
         Files.createDirectories(CONFIG_DIR);
         if (!Files.exists(INIT_FILE)) return;
 
         String content = Files.readString(INIT_FILE);
-
-        // Pattern to find or add lingle_path in init.lua
-        Pattern linglepathPattern = Pattern.compile("(?m)^(\\s*local\\s+lingle_path\\s*=\\s*waywall_config_path\\s*\\.\\.\\s*\")([^\"]*)(\"\\s*,?\\s*)$");
-        Matcher m = linglepathPattern.matcher(content);
-
         String updated;
-        if (m.find()) {
-            // Replace existing lingle_path
-            updated = m.replaceAll("$1" + Matcher.quoteReplacement(homeRelative) + "$3");
+
+        // Try multiple patterns for different config formats
+        // Pattern 1: waywall_config_path .. "path"
+        Pattern p1 = Pattern.compile("(?m)^(\\s*local\\s+" + Pattern.quote(varName) + "\\s*=\\s*waywall_config_path\\s*\\.\\.\\s*\")([^\"]*)(\"\\s*,?\\s*)$");
+        // Pattern 2: home_path .. "path"
+        Pattern p2 = Pattern.compile("(?m)^(\\s*local\\s+" + Pattern.quote(varName) + "\\s*=\\s*home_path\\s*\\.\\.\\s*\")([^\"]*)(\"\\s*,?\\s*)$");
+        // Pattern 3: os.getenv("HOME") .. "path"
+        Pattern p3 = Pattern.compile("(?m)^(\\s*local\\s+" + Pattern.quote(varName) + "\\s*=\\s*os\\.getenv\\(\"HOME\"\\)\\s*\\.\\.\\s*\")([^\"]*)(\"\\s*,?\\s*)$");
+
+        Matcher m1 = p1.matcher(content);
+        Matcher m2 = p2.matcher(content);
+        Matcher m3 = p3.matcher(content);
+
+        // Adjust homeRelative based on pattern
+        String valueForWaywallPath = homeRelative;
+        String valueForHomePath = homeRelative.startsWith("/") ? homeRelative.substring(1) : homeRelative;
+
+        if (m1.find()) {
+            updated = p1.matcher(content).replaceAll("$1" + Matcher.quoteReplacement(valueForWaywallPath) + "$3");
+        } else if (m2.find()) {
+            updated = p2.matcher(content).replaceAll("$1" + Matcher.quoteReplacement(valueForHomePath) + "$3");
+        } else if (m3.find()) {
+            updated = p3.matcher(content).replaceAll("$1" + Matcher.quoteReplacement(homeRelative) + "$3");
         } else {
-            // Add lingle_path after waywall_config_path definition
-            Pattern waywallConfigPathPattern = Pattern.compile("(?m)^(\\s*local\\s+waywall_config_path\\s*=.*\\n)");
-            Matcher m2 = waywallConfigPathPattern.matcher(content);
-            if (m2.find()) {
-                String insertion = "local lingle_path = waywall_config_path .. \"" + homeRelative + "\"\n";
-                updated = m2.replaceFirst("$1" + Matcher.quoteReplacement(insertion));
+            // Variable doesn't exist - add it based on config format
+            String pathBase;
+            String pathValue;
+            if (isGenericConfig()) {
+                pathBase = "waywall_config_path";
+                pathValue = homeRelative;
             } else {
-                // Fallback: add at the beginning after imports
-                updated = content.replaceFirst("(?m)(-- Other inits\\n)", "$1local lingle_path = waywall_config_path .. \"" + homeRelative + "\"\n");
+                // Check if home_path is defined
+                if (content.contains("local home_path")) {
+                    pathBase = "home_path";
+                    pathValue = valueForHomePath;
+                } else {
+                    pathBase = "os.getenv(\"HOME\")";
+                    pathValue = homeRelative;
+                }
+            }
+
+            String insertion = "local " + varName + " = " + pathBase + " .. \"" + pathValue + "\"\n";
+
+            // Find appropriate insertion point
+            Pattern pathsSection = Pattern.compile("(?m)^(\\s*local\\s+(?:pacem_path|nb_path|overlay_path)\\s*=.*\\n)");
+            Matcher pm = pathsSection.matcher(content);
+            if (pm.find()) {
+                // Insert after other path definitions
+                int insertPos = pm.end();
+                updated = content.substring(0, insertPos) + insertion + content.substring(insertPos);
+            } else {
+                // Fallback: add near the top after imports
+                updated = content.replaceFirst("(?m)(local waywall = require.*?\\n)", "$1" + Matcher.quoteReplacement(insertion));
             }
         }
 
@@ -128,7 +199,7 @@ public class WaywallConfig {
     public static void addLingleToConfig() throws IOException {
         Files.createDirectories(CONFIG_DIR);
         if (!Files.exists(INIT_FILE)) {
-            throw new IOException("Waywall init.lua not found. Please install waywall generic config first.");
+            throw new IOException("Waywall init.lua not found. Please install waywall config first.");
         }
 
         String content = Files.readString(INIT_FILE);
@@ -137,46 +208,78 @@ public class WaywallConfig {
     }
 
     private static String ensureLingleLauncherCode(String content) {
-        // Check if lingle launcher code already exists
         if (content.contains("--*********************************************************************************************** LINGLE")) {
             return content;
         }
 
-        // Add lingle launcher code after NINJABRAIN section
-        String lingleCode = "\n" +
-                "--*********************************************************************************************** LINGLE\n" +
-                "local toggle_lingle = cfg.toggle_lingle or false\n" +
-                "\n" +
-                "local is_lingle_running = function()\n" +
-                "    local handle = io.popen(\"pgrep -f 'lingle.*jar'\")\n" +
-                "    local result = handle:read(\"*l\")\n" +
-                "    handle:close()\n" +
-                "    return result ~= nil\n" +
-                "end\n" +
-                "\n" +
-                "local exec_lingle = function()\n" +
-                "    if toggle_lingle and not is_lingle_running() then\n" +
-                "        waywall.exec(\"java -jar \" .. lingle_path)\n" +
-                "    end\n" +
-                "end\n" +
-                "\n" +
-                "-- Auto-launch lingle when toggle_lingle is enabled\n" +
-                "if toggle_lingle then\n" +
-                "    exec_lingle()\n" +
-                "end\n\n";
+        boolean isGeneric = content.contains("require(\"config\")") || content.contains("local cfg = require");
 
-        // Insert after NINJABRAIN section
-        Pattern ninjaSectionEnd = Pattern.compile("(?m)(local exec_ninb = function\\(\\).*?end\\n)");
+        String lingleCode;
+        if (isGeneric) {
+            lingleCode = "\n" +
+                    "--*********************************************************************************************** LINGLE\n" +
+                    "local toggle_lingle = cfg.toggle_lingle or false\n" +
+                    "\n" +
+                    "local is_lingle_running = function()\n" +
+                    "    local handle = io.popen(\"pgrep -f 'lingle.*jar'\")\n" +
+                    "    local result = handle:read(\"*l\")\n" +
+                    "    handle:close()\n" +
+                    "    return result ~= nil\n" +
+                    "end\n" +
+                    "\n" +
+                    "local exec_lingle = function()\n" +
+                    "    if toggle_lingle and not is_lingle_running() then\n" +
+                    "        waywall.exec(\"java -jar \" .. lingle_path)\n" +
+                    "    end\n" +
+                    "end\n" +
+                    "\n" +
+                    "if toggle_lingle then\n" +
+                    "    exec_lingle()\n" +
+                    "end\n\n";
+        } else {
+            // Barebones format - simpler approach
+            lingleCode = "\n" +
+                    "--*********************************************************************************************** LINGLE\n" +
+                    "local is_lingle_running = function()\n" +
+                    "    local handle = io.popen(\"pgrep -f 'lingle.*jar'\")\n" +
+                    "    local result = handle:read(\"*l\")\n" +
+                    "    handle:close()\n" +
+                    "    return result ~= nil\n" +
+                    "end\n" +
+                    "\n" +
+                    "local exec_lingle = function()\n" +
+                    "    if lingle_path and not is_lingle_running() then\n" +
+                    "        waywall.exec(\"java -jar \" .. lingle_path)\n" +
+                    "    end\n" +
+                    "end\n\n";
+        }
+
+        // Try to insert after NINJABRAIN section
+        Pattern ninjaSectionEnd = Pattern.compile("(?m)(local exec_ninb = function\\(\\).*?end\\n)", Pattern.DOTALL);
         Matcher m = ninjaSectionEnd.matcher(content);
         if (m.find()) {
             return m.replaceFirst("$1" + Matcher.quoteReplacement(lingleCode));
         }
 
-        // Fallback: add before MIRRORS section
-        Pattern beforeMirrors = Pattern.compile("(?m)(\\n--\\*+\\s*MIRRORS)");
+        // Try before MIRRORS section
+        Pattern beforeMirrors = Pattern.compile("(?m)(\\n--\\s*====\\s*MIRRORS\\s*====)");
         Matcher m2 = beforeMirrors.matcher(content);
         if (m2.find()) {
             return m2.replaceFirst(Matcher.quoteReplacement(lingleCode) + "$1");
+        }
+
+        // Try before config table
+        Pattern beforeConfig = Pattern.compile("(?m)(\\n--\\s*====\\s*CONFIG\\s*====)");
+        Matcher m3 = beforeConfig.matcher(content);
+        if (m3.find()) {
+            return m3.replaceFirst(Matcher.quoteReplacement(lingleCode) + "$1");
+        }
+
+        // Fallback: add before return config
+        Pattern beforeReturn = Pattern.compile("(?m)(\\nreturn config\\s*$)");
+        Matcher m4 = beforeReturn.matcher(content);
+        if (m4.find()) {
+            return m4.replaceFirst(Matcher.quoteReplacement(lingleCode) + "$1");
         }
 
         return content;
@@ -194,7 +297,8 @@ public class WaywallConfig {
 
     public static void setKeybindPlaceholder(String placeholderToken, String keybind) throws IOException {
         Files.createDirectories(CONFIG_DIR);
-        String content = Files.exists(CONFIG_FILE) ? Files.readString(CONFIG_FILE) : "";
+        Path file = getEditableFile();
+        String content = Files.exists(file) ? Files.readString(file) : "";
         Pattern quotedToken = Pattern.compile("(?m)(\")" + Pattern.quote(placeholderToken) + "(\")");
         Matcher m = quotedToken.matcher(content);
         String updated = m.replaceAll("$1" + Matcher.quoteReplacement(keybind) + "$2");
@@ -206,59 +310,69 @@ public class WaywallConfig {
         if (updated.equals(content)) {
             updated = content + (content.endsWith("\n") ? "" : "\n") + "-- " + placeholderToken + " = '" + keybind + "'\n";
         }
-        Files.writeString(CONFIG_FILE, updated, StandardCharsets.UTF_8);
+        Files.writeString(file, updated, StandardCharsets.UTF_8);
     }
-
 
     public static void setKeybindVar(String varName, String value, boolean withStar, boolean isPlaceholder) throws IOException {
         Files.createDirectories(CONFIG_DIR);
-        String content = Files.exists(CONFIG_FILE) ? Files.readString(CONFIG_FILE) : "";
+        Path file = getEditableFile();
+        String content = Files.exists(file) ? Files.readString(file) : "";
         String inner = (withStar ? "*-" : "") + value;
 
         String updated;
         boolean wasAdded = false;
+        boolean isGeneric = isGenericConfig();
 
-        // Check if this is a table-based keybind (thin, wide, tall)
+        // Check if this is a resolution keybind (thin, wide, tall)
         if (varName.equals("thin") || varName.equals("wide") || varName.equals("tall")) {
-            // Pattern to match: local thin = { key = "*-Alt_L", f3_safe = false }
+            // Generic format: local thin = { key = "*-Alt_L", f3_safe = false }
             Pattern tablePattern = Pattern.compile("(?m)^(\\s*local\\s+" + Pattern.quote(varName) + "\\s*=\\s*\\{[^}]*key\\s*=\\s*\")([^\"]*)(\"[^}]*\\})");
-            Matcher m = tablePattern.matcher(content);
-            if (m.find()) {
-                updated = m.replaceAll("$1" + Matcher.quoteReplacement(inner) + "$3");
+            Matcher tableMatch = tablePattern.matcher(content);
+
+            // Barebones format: local thin = "*-Alt_L"
+            Pattern simplePattern = Pattern.compile("(?m)^(\\s*local\\s+" + Pattern.quote(varName) + "\\s*=\\s*\")([^\"]*)(\"\\s*,?\\s*)$");
+            Matcher simpleMatch = simplePattern.matcher(content);
+
+            if (tableMatch.find()) {
+                updated = tablePattern.matcher(content).replaceAll("$1" + Matcher.quoteReplacement(inner) + "$3");
+            } else if (simpleMatch.find()) {
+                updated = simplePattern.matcher(content).replaceAll("$1" + Matcher.quoteReplacement(inner) + "$3");
             } else {
-                // Add new table entry before export section
-                String varDef = "local " + varName + " = { key = \"" + inner + "\", f3_safe = false }\n";
-                Pattern beforeExport = Pattern.compile("(?m)(\\n-- ======== EXPORT ========\\n)");
-                Matcher m2 = beforeExport.matcher(content);
-                if (m2.find()) {
-                    updated = m2.replaceFirst(varDef + "$1");
+                // Add new keybind
+                String varDef;
+                if (isGeneric) {
+                    varDef = "local " + varName + " = { key = \"" + inner + "\", f3_safe = false }\n";
                 } else {
-                    updated = content + (content.endsWith("\n") ? "" : "\n") + varDef;
+                    varDef = "local " + varName + " = \"" + inner + "\"\n";
                 }
+                updated = addVarToContent(content, varDef, isGeneric);
                 wasAdded = true;
             }
         } else {
-            // Simple string keybind: local toggle_ninbot_key = "*-apostrophe"
-            Pattern stringPattern = Pattern.compile("(?m)^(\\s*local\\s+" + Pattern.quote(varName) + "\\s*=\\s*\")(.*?)(\"\\s*,?\\s*)$");
-            Matcher m = stringPattern.matcher(content);
-            if (m.find()) {
-                updated = m.replaceAll("$1" + Matcher.quoteReplacement(inner) + "$3");
-            } else {
-                // Add new keybind before export section
-                String varDef = "local " + varName + " = \"" + inner + "\"\n";
-                Pattern beforeExport = Pattern.compile("(?m)(\\n-- ======== EXPORT ========\\n)");
-                Matcher m2 = beforeExport.matcher(content);
-                if (m2.find()) {
-                    updated = m2.replaceFirst(varDef + "$1");
-                } else {
-                    updated = content + (content.endsWith("\n") ? "" : "\n") + varDef;
+            // Other keybinds - try both generic (_key suffix) and barebones (no suffix) naming
+            String[] varNames = {varName, varName.replace("_key", "")};
+
+            boolean found = false;
+            updated = content;
+            for (String vn : varNames) {
+                Pattern stringPattern = Pattern.compile("(?m)^(\\s*local\\s+" + Pattern.quote(vn) + "\\s*=\\s*\")([^\"]*)(\"\\s*,?\\s*)$");
+                Matcher m = stringPattern.matcher(updated);
+                if (m.find()) {
+                    updated = stringPattern.matcher(updated).replaceAll("$1" + Matcher.quoteReplacement(inner) + "$3");
+                    found = true;
+                    break;
                 }
+            }
+
+            if (!found) {
+                String varDef = "local " + varName + " = \"" + inner + "\"\n";
+                updated = addVarToContent(content, varDef, isGeneric);
                 wasAdded = true;
             }
         }
 
-        // Add to export table if this was a new variable
-        if (wasAdded) {
+        // For generic format, add to export table if new variable
+        if (wasAdded && isGeneric) {
             String exportEntry = "    " + varName + " = " + varName + ",\n";
             Pattern beforeClosingBrace = Pattern.compile("(?m)(\\n\\}\\n*$)");
             Matcher m3 = beforeClosingBrace.matcher(updated);
@@ -267,19 +381,37 @@ public class WaywallConfig {
             }
         }
 
-        Files.writeString(CONFIG_FILE, updated, StandardCharsets.UTF_8);
+        Files.writeString(file, updated, StandardCharsets.UTF_8);
     }
 
+    private static String addVarToContent(String content, String varDef, boolean isGeneric) {
+        if (isGeneric) {
+            Pattern beforeExport = Pattern.compile("(?m)(\\n-- ======== EXPORT ========\\n)");
+            Matcher m = beforeExport.matcher(content);
+            if (m.find()) {
+                return m.replaceFirst(varDef + "$1");
+            }
+        } else {
+            // Barebones: add after KEYS section
+            Pattern afterKeys = Pattern.compile("(?m)(-- ==== KEYS ====\\n(?:local \\w+ = \"[^\"]+\"\\n)+)");
+            Matcher m = afterKeys.matcher(content);
+            if (m.find()) {
+                return m.replaceFirst("$1" + Matcher.quoteReplacement(varDef));
+            }
+        }
+        return content + (content.endsWith("\n") ? "" : "\n") + varDef;
+    }
 
     public static void readKeybindsFromFile() throws IOException {
-        if (!Files.exists(CONFIG_FILE)) {
-            throw new IOException("Existing Config file not found: " + CONFIG_FILE);
+        Path file = getEditableFile();
+        if (!Files.exists(file)) {
+            throw new IOException("Config file not found: " + file);
         }
 
-        String content = Files.readString(CONFIG_FILE);
+        String content = Files.readString(file);
 
-        // Pattern for simple string keybinds like: local toggle_ninbot_key = "*-apostrophe"
-        Pattern stringVarPattern = Pattern.compile("(?m)^\\s*local\\s+(\\w+_key)\\s*=\\s*\"([^\"]+)\"\\s*,?\\s*$");
+        // Generic format: local toggle_ninbot_key = "*-apostrophe"
+        Pattern stringVarPattern = Pattern.compile("(?m)^\\s*local\\s+(\\w+)\\s*=\\s*\"([^\"]+)\"\\s*,?\\s*$");
         Matcher m1 = stringVarPattern.matcher(content);
 
         while (m1.find()) {
@@ -289,15 +421,24 @@ public class WaywallConfig {
             if (value.startsWith("*-")) value = value.substring(2);
             if (value.toLowerCase().contains("placeholder") || value.isBlank()) continue;
 
-            if (varName.contains("ninbot") || varName.contains("nbb") || varName.contains("show"))
+            // Map variable names to keybind names
+            if (varName.contains("ninbot") || varName.contains("nbb") || varName.equals("toggle_ninbot"))
                 LingleState.setSetKeybind("NBB_Key", value);
-            else if (varName.contains("fullscreen")) LingleState.setSetKeybind("Fullscreen_Key", value);
-            else if ((varName.contains("launch") || varName.contains("paceman")))
+            else if (varName.contains("fullscreen"))
+                LingleState.setSetKeybind("Fullscreen_Key", value);
+            else if (varName.contains("launch") || varName.contains("paceman") || varName.equals("launch_paceman"))
                 LingleState.setSetKeybind("Apps_Key", value);
-            else if (varName.contains("remap")) LingleState.setSetKeybind("Remaps_Key", value);
+            else if (varName.contains("remap"))
+                LingleState.setSetKeybind("Remaps_Key", value);
+            else if (varName.equals("thin"))
+                LingleState.setSetKeybind("Thin_Key", value);
+            else if (varName.equals("wide"))
+                LingleState.setSetKeybind("Wide_Key", value);
+            else if (varName.equals("tall"))
+                LingleState.setSetKeybind("Tall_Key", value);
         }
 
-        // Pattern for table keybinds like: local thin = { key = "*-Alt_L", f3_safe = false }
+        // Generic format table keybinds: local thin = { key = "*-Alt_L", f3_safe = false }
         Pattern tableKeyPattern = Pattern.compile("(?m)^\\s*local\\s+(thin|wide|tall)\\s*=\\s*\\{[^}]*key\\s*=\\s*\"([^\"]+)\"");
         Matcher m2 = tableKeyPattern.matcher(content);
 
@@ -317,72 +458,114 @@ public class WaywallConfig {
     public static void writeRemapsFile(java.util.List<Remaps> remaps) throws IOException {
         Files.createDirectories(CONFIG_DIR);
 
-        StringBuilder sb = new StringBuilder();
-        sb.append("return {\n");
-        sb.append("    remapped_kb = {\n");
-        sb.append("        -- Add any playing remaps here (active during gameplay, toggled with remaps key)\n");
+        if (isGenericConfig()) {
+            // Write to separate remaps.lua file
+            StringBuilder sb = new StringBuilder();
+            sb.append("return {\n");
+            sb.append("    remapped_kb = {\n");
+            sb.append("        -- Add any playing remaps here (active during gameplay, toggled with remaps key)\n");
 
-        // Toggleable remaps go to remapped_kb (active during gameplay, can be toggled off)
-        for (Remaps remap : remaps) {
-            if (!remap.isPermanent && !remap.fromKey.isEmpty() && !remap.toKey.isEmpty()) {
-                sb.append("        [\"").append(remap.fromKey).append("\"] = \"").append(remap.toKey).append("\",\n");
+            for (Remaps remap : remaps) {
+                if (!remap.isPermanent && !remap.fromKey.isEmpty() && !remap.toKey.isEmpty()) {
+                    sb.append("        [\"").append(remap.fromKey).append("\"] = \"").append(remap.toKey).append("\",\n");
+                }
             }
-        }
 
-        sb.append("\n    },\n\n");
-        sb.append("    normal_kb = {\n");
-        sb.append("        -- Add any remaps you want to keep when disabling normal remaps (always active)\n");
+            sb.append("\n    },\n\n");
+            sb.append("    normal_kb = {\n");
+            sb.append("        -- Add any remaps you want to keep when disabling normal remaps (always active)\n");
 
-        // Permanent/always-active remaps go to normal_kb (stay active even when remaps are toggled off)
-        for (Remaps remap : remaps) {
-            if (remap.isPermanent && !remap.fromKey.isEmpty() && !remap.toKey.isEmpty()) {
-                sb.append("        [\"").append(remap.fromKey).append("\"] = \"").append(remap.toKey).append("\",\n");
+            for (Remaps remap : remaps) {
+                if (remap.isPermanent && !remap.fromKey.isEmpty() && !remap.toKey.isEmpty()) {
+                    sb.append("        [\"").append(remap.fromKey).append("\"] = \"").append(remap.toKey).append("\",\n");
+                }
             }
+
+            sb.append("\n    },\n\n");
+            sb.append("}\n");
+
+            Files.writeString(REMAPS, sb.toString(), StandardCharsets.UTF_8);
+        } else {
+            // Barebones: update remapped_kb inline in init.lua
+            if (!Files.exists(INIT_FILE)) return;
+
+            String content = Files.readString(INIT_FILE);
+
+            // Build new remapped_kb content
+            StringBuilder sb = new StringBuilder();
+            sb.append("local remapped_kb = {\n");
+            for (Remaps remap : remaps) {
+                if (!remap.fromKey.isEmpty() && !remap.toKey.isEmpty()) {
+                    sb.append("    [\"").append(remap.fromKey).append("\"] = \"").append(remap.toKey).append("\",\n");
+                }
+            }
+            sb.append("}");
+
+            // Replace existing remapped_kb
+            Pattern remappedKbPattern = Pattern.compile("(?m)^local remapped_kb = \\{[^}]*\\}", Pattern.DOTALL);
+            Matcher m = remappedKbPattern.matcher(content);
+            String updated;
+            if (m.find()) {
+                updated = m.replaceFirst(Matcher.quoteReplacement(sb.toString()));
+            } else {
+                // Add after keys section
+                Pattern afterKeys = Pattern.compile("(?m)(-- ==== KEYS ====\\n(?:local \\w+ = \"[^\"]+\"\\n)+)");
+                Matcher m2 = afterKeys.matcher(content);
+                if (m2.find()) {
+                    updated = m2.replaceFirst("$1\n" + Matcher.quoteReplacement(sb.toString()) + "\n");
+                } else {
+                    updated = content + "\n" + sb.toString() + "\n";
+                }
+            }
+
+            Files.writeString(INIT_FILE, updated, StandardCharsets.UTF_8);
         }
-
-        sb.append("\n    },\n\n");
-        sb.append("}\n");
-
-        Files.writeString(REMAPS, sb.toString(), StandardCharsets.UTF_8);
     }
 
     public static java.util.List<Remaps> readRemapsFile() {
         java.util.List<Remaps> remaps = new java.util.ArrayList<>();
         try {
-            if (!Files.exists(REMAPS)) return remaps;
+            if (isGenericConfig()) {
+                // Read from remaps.lua
+                if (!Files.exists(REMAPS)) return remaps;
+                String content = Files.readString(REMAPS);
 
-            String content = Files.readString(REMAPS);
+                // Parse remapped_kb (toggleable)
+                Pattern remappedKbSection = Pattern.compile("remapped_kb\\s*=\\s*\\{([^}]+)\\}", Pattern.DOTALL);
+                Matcher m1 = remappedKbSection.matcher(content);
+                if (m1.find()) {
+                    parseRemapEntries(m1.group(1), remaps, false);
+                }
 
-            // Parse remapped_kb (toggleable - active during gameplay)
-            Pattern remappedKbSection = Pattern.compile("remapped_kb\\s*=\\s*\\{([^}]+)\\}", Pattern.DOTALL);
-            Matcher m1 = remappedKbSection.matcher(content);
-            if (m1.find()) {
-                String section = m1.group(1);
-                Pattern entryPattern = Pattern.compile("\\[\"([^\"]+)\"\\]\\s*=\\s*\"([^\"]+)\"");
-                Matcher entries = entryPattern.matcher(section);
-                while (entries.find()) {
-                    String from = entries.group(1);
-                    String to = entries.group(2);
-                    remaps.add(new Remaps(from, to, false)); // toggleable = isPermanent false
+                // Parse normal_kb (permanent)
+                Pattern normalKbSection = Pattern.compile("normal_kb\\s*=\\s*\\{([^}]+)\\}", Pattern.DOTALL);
+                Matcher m2 = normalKbSection.matcher(content);
+                if (m2.find()) {
+                    parseRemapEntries(m2.group(1), remaps, true);
+                }
+            } else {
+                // Read from init.lua inline remapped_kb
+                if (!Files.exists(INIT_FILE)) return remaps;
+                String content = Files.readString(INIT_FILE);
+
+                Pattern remappedKbPattern = Pattern.compile("local remapped_kb\\s*=\\s*\\{([^}]*)\\}", Pattern.DOTALL);
+                Matcher m = remappedKbPattern.matcher(content);
+                if (m.find()) {
+                    parseRemapEntries(m.group(1), remaps, false);
                 }
             }
-
-            // Parse normal_kb (always active - permanent)
-            Pattern normalKbSection = Pattern.compile("normal_kb\\s*=\\s*\\{([^}]+)\\}", Pattern.DOTALL);
-            Matcher m2 = normalKbSection.matcher(content);
-            if (m2.find()) {
-                String section = m2.group(1);
-                Pattern entryPattern = Pattern.compile("\\[\"([^\"]+)\"\\]\\s*=\\s*\"([^\"]+)\"");
-                Matcher entries = entryPattern.matcher(section);
-                while (entries.find()) {
-                    String from = entries.group(1);
-                    String to = entries.group(2);
-                    remaps.add(new Remaps(from, to, true)); // always active = isPermanent true
-                }
-            }
-
         } catch (IOException ignored) {}
         return remaps;
+    }
+
+    private static void parseRemapEntries(String section, java.util.List<Remaps> remaps, boolean isPermanent) {
+        Pattern entryPattern = Pattern.compile("\\[\"([^\"]+)\"\\]\\s*=\\s*\"([^\"]+)\"");
+        Matcher entries = entryPattern.matcher(section);
+        while (entries.find()) {
+            String from = entries.group(1);
+            String to = entries.group(2);
+            remaps.add(new Remaps(from, to, isPermanent));
+        }
     }
 
     public static Path getConfigDir() { return CONFIG_DIR; }

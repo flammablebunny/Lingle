@@ -1229,6 +1229,41 @@ public class LingleUI extends JFrame {
         configurePrismRow.add(configurePrismButton);
         installerPanel.add(configurePrismRow);
 
+        // ===== Waywall Config Section =====
+        installerPanel.add(Box.createVerticalStrut(25));
+
+        JLabel configTitle = new JLabel("Waywall Config:");
+        configTitle.setForeground(TXT);
+        configTitle.setFont(UI_FONT_BOLD);
+        configTitle.setAlignmentX(Component.LEFT_ALIGNMENT);
+        installerPanel.add(configTitle);
+
+        installerPanel.add(Box.createVerticalStrut(8));
+
+        ButtonGroup configGroup = new ButtonGroup();
+        JRadioButton genericConfig = new JRadioButton("Gore Generic Config");
+        JRadioButton barebones1080 = new JRadioButton("Gore Barebones Config (1080p)");
+        JRadioButton barebones1440 = new JRadioButton("Gore Barebones Config (1440p)");
+
+        for (JRadioButton rb : new JRadioButton[]{genericConfig, barebones1080, barebones1440}) {
+            rb.setBackground(BG);
+            rb.setForeground(TXT);
+            rb.setFont(UI_FONT);
+            rb.setFocusPainted(false);
+            rb.setAlignmentX(Component.LEFT_ALIGNMENT);
+            rb.setBorder(BorderFactory.createEmptyBorder(3, 2, 3, 2));
+            configGroup.add(rb);
+            installerPanel.add(rb);
+        }
+        genericConfig.setSelected(true);
+
+        installerPanel.add(Box.createVerticalStrut(10));
+
+        JButton installConfigBtn = makeButton("Install Waywall Config", 200);
+        JPanel configBtnRow = leftRow();
+        configBtnRow.add(installConfigBtn);
+        installerPanel.add(configBtnRow);
+
         installerPanel.add(Box.createVerticalGlue());
 
         installButton.addActionListener(e -> {
@@ -1263,6 +1298,92 @@ public class LingleUI extends JFrame {
         configurePrismButton.addActionListener(e -> {
             logAction("User clicked: Configure Prism Settings");
             showConfigurePrismDialog();
+        });
+
+        installConfigBtn.addActionListener(e -> {
+            String configType = genericConfig.isSelected() ? "Generic" :
+                               barebones1080.isSelected() ? "Barebones 1080p" : "Barebones 1440p";
+            logAction("User clicked: Install Waywall Config - " + configType);
+
+            try {
+                Path userHome = Path.of(System.getProperty("user.home"));
+                Path waywallConfig = userHome.resolve(".config/waywall");
+                Path backupDir = userHome.resolve(".local/share/lingle/waywallbkps");
+
+                // Backup existing config if it exists
+                if (Files.exists(waywallConfig)) {
+                    Files.createDirectories(backupDir);
+                    String timestamp = java.time.LocalDateTime.now()
+                        .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
+                    Path backupDest = backupDir.resolve("waywall_" + timestamp);
+                    logInfo("Backing up existing waywall config to: " + backupDest);
+
+                    // Copy recursively
+                    try (var stream = Files.walk(waywallConfig)) {
+                        for (Path source : stream.toList()) {
+                            Path dest = backupDest.resolve(waywallConfig.relativize(source));
+                            if (Files.isDirectory(source)) {
+                                Files.createDirectories(dest);
+                            } else {
+                                Files.copy(source, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                            }
+                        }
+                    }
+                    logSuccess("Waywall config backed up successfully");
+
+                    // Remove existing config directory
+                    logInfo("Removing existing waywall config...");
+                    try (var walk = Files.walk(waywallConfig)) {
+                        walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+                            try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+                        });
+                    }
+                }
+
+                // Clone the selected config
+                String repoUrl;
+                String branch = null;
+                if (genericConfig.isSelected()) {
+                    repoUrl = "https://github.com/arjuncgore/waywall_generic_config.git";
+                } else {
+                    repoUrl = "https://github.com/arjuncgore/waywall_barebones_config.git";
+                    if (barebones1440.isSelected()) {
+                        branch = "1440";
+                    }
+                }
+
+                logInfo("Cloning waywall config from: " + repoUrl + (branch != null ? " (branch: " + branch + ")" : ""));
+
+                ProcessBuilder pb;
+                if (branch != null) {
+                    pb = new ProcessBuilder("git", "clone", repoUrl, waywallConfig.toString(), "-b", branch);
+                } else {
+                    pb = new ProcessBuilder("git", "clone", repoUrl, waywallConfig.toString());
+                }
+                pb.redirectErrorStream(true);
+                Process proc = pb.start();
+
+                // Read output
+                try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(proc.getInputStream()))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        logOutput(line);
+                    }
+                }
+
+                int exitCode = proc.waitFor();
+                if (exitCode == 0) {
+                    logSuccess("Waywall config installed successfully: " + configType);
+                    showDarkMessage(this, "Success", "Waywall config installed successfully!\n\nConfig: " + configType +
+                        (Files.exists(backupDir) ? "\n\nYour previous config was backed up to:\n" + backupDir : ""));
+                } else {
+                    logError("Failed to clone waywall config, exit code: " + exitCode);
+                    showDarkMessage(this, "Error", "Failed to install waywall config (exit code: " + exitCode + ")");
+                }
+            } catch (Exception ex) {
+                logError("Failed to install waywall config", ex);
+                showDarkMessage(this, "Error", "Failed to install waywall config:\n" + ex.getMessage());
+            }
         });
 
         JPanel supportPanel = new JPanel();
