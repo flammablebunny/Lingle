@@ -11,7 +11,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class Updater {
-    public static final String CURRENT_VERSION = "1.0.0";
+    public static final String CURRENT_VERSION = "1.1";
 
     private static int compareVersions(String v1) {
         String[] a1 = v1.replaceFirst("^v", "").split("\\.");
@@ -27,26 +27,47 @@ public class Updater {
 
     public static void checkForUpdates() {
         try {
-            URL url = new URL("https://api.github.com/repos/Flammable-Bunny/Lingle/releases");
+            // Fetch latest release info
+            URL url = new URL("https://api.github.com/repos/flammablebunny/Lingle/releases/latest");
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestProperty("Accept", "application/vnd.github.v3+json");
             conn.setConnectTimeout(5000);
             conn.setReadTimeout(5000);
 
+            if (conn.getResponseCode() != 200) {
+                LingleLogger.logInfo("Update check failed: HTTP " + conn.getResponseCode());
+                return;
+            }
+
             String json;
             try (InputStream in = conn.getInputStream()) {
                 json = new String(in.readAllBytes(), StandardCharsets.UTF_8);
             }
-            
-            Pattern releasePattern = Pattern.compile("\\{[^}]*\"tag_name\"\\s*:\\s*\"([^\"]+)\"[^}]*\"browser_download_url\"\\s*:\\s*\"([^\"]*\\.jar)\"[^}]*}");
-            Matcher releaseMatcher = releasePattern.matcher(json);
 
-            if (!releaseMatcher.find()) return;
+            // Extract tag_name (version)
+            Pattern tagPattern = Pattern.compile("\"tag_name\"\\s*:\\s*\"([^\"]+)\"");
+            Matcher tagMatcher = tagPattern.matcher(json);
+            if (!tagMatcher.find()) {
+                LingleLogger.logInfo("Update check: Could not find tag_name in response");
+                return;
+            }
+            String latest = tagMatcher.group(1).trim();
 
-            String latest = releaseMatcher.group(1).trim();
-            String downloadUrl = releaseMatcher.group(2);
+            // Extract download URL for .jar file from assets
+            Pattern assetPattern = Pattern.compile("\"browser_download_url\"\\s*:\\s*\"([^\"]*\\.jar)\"");
+            Matcher assetMatcher = assetPattern.matcher(json);
+            if (!assetMatcher.find()) {
+                LingleLogger.logInfo("Update check: Could not find .jar download URL");
+                return;
+            }
+            String downloadUrl = assetMatcher.group(1);
 
-            if (compareVersions(latest) <= 0) return;
+            LingleLogger.logInfo("Update check: current=" + CURRENT_VERSION + ", latest=" + latest);
+
+            if (compareVersions(latest) <= 0) {
+                LingleLogger.logInfo("No update needed");
+                return;
+            }
 
             boolean choice = UIUtils.showDarkConfirm(
                     null,
@@ -56,7 +77,9 @@ public class Updater {
             if (choice) {
                 downloadAndReplaceJar(downloadUrl);
             }
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            LingleLogger.logInfo("Update check failed: " + e.getMessage());
+        }
     }
 
     private static void downloadAndReplaceJar(String downloadUrl) throws IOException {
