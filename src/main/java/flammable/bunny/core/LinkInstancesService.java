@@ -57,40 +57,41 @@ public class LinkInstancesService {
     }
 
     public static void preparePracticeMapLinks() throws IOException {
-        if (!LingleState.practiceMaps || !LingleState.enabled) return;
-        Path home = Path.of(System.getProperty("user.home"));
-        Path scriptsDir = home.resolve(".local/share/lingle/scripts");
-        Files.createDirectories(scriptsDir);
+        // Always update the startup script with current state
+        // Include practice map links only if practice maps are enabled
+        List<String> mapsToLink = (LingleState.practiceMaps && LingleState.enabled)
+                ? LingleState.selectedPracticeMaps
+                : List.of();
 
-        StringBuilder sb = new StringBuilder("#!/bin/bash\nset -e\n\n");
-        sb.append("for k in {1..").append(LingleState.instanceCount).append("}\ndo\n")
-                .append("  mkdir -p \"$HOME/Lingle/$k\"\n");
-        for (String map : LingleState.selectedPracticeMaps) {
-            sb.append("  ln -sf \"$HOME/.local/share/lingle/saves/Z_")
-                    .append(map).append("\" \"$HOME/Lingle/$k/\"\n");
+        TmpfsScriptManager.updateStartupScript(LingleState.instanceCount, mapsToLink);
+
+        // Run the script immediately if practice maps are enabled
+        if (LingleState.practiceMaps && LingleState.enabled) {
+            Path home = Path.of(System.getProperty("user.home"));
+            Path linkScript = home.resolve(".local/share/lingle/scripts/link_practice_maps.sh");
+            if (Files.exists(linkScript)) {
+                new ProcessBuilder("/bin/bash", linkScript.toString()).start();
+            }
         }
-        sb.append("done\n");
-
-        Path linkScript = scriptsDir.resolve("link_practice_maps.sh");
-        Files.writeString(linkScript, sb.toString(), StandardCharsets.UTF_8);
-        linkScript.toFile().setExecutable(true);
-        new ProcessBuilder("/bin/bash", linkScript.toString()).start();
     }
 
     public static void installCreateDirsService(JFrame parent) {
         try {
             LingleLogger.logInfo("Installing Lingle startup service...");
+
+            // Ensure the startup script exists and is up to date
             preparePracticeMapLinks();
 
             Path home = Path.of(System.getProperty("user.home"));
             Path scriptsDir = home.resolve(".local/share/lingle/scripts");
             Path script = scriptsDir.resolve("link_practice_maps.sh");
+
             if (!Files.exists(script)) {
-                LingleLogger.logError("Script not found: " + script);
-                UIUtils.showDarkMessage(parent, "Error", "Missing script: " + script);
+                LingleLogger.logError("Script not found after preparation: " + script);
+                UIUtils.showDarkMessage(parent, "Error", "Failed to create startup script");
                 return;
             }
-            LingleLogger.logInfo("Found script: " + script);
+            LingleLogger.logInfo("Using script: " + script);
 
             try {
                 Set<PosixFilePermission> perms = EnumSet.of(

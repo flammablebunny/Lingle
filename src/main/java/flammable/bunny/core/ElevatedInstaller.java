@@ -96,18 +96,17 @@ public class ElevatedInstaller {
 
             // Determine elevation method on first use
             if (useSudo == null) {
-                // Prefer sudo when running in a terminal (pkexec has issues with terminal stdin)
-                // Only use pkexec for graphical environments with a polkit agent
-                if (isRunningInTerminal() && isSudoAvailable()) {
-                    useSudo = true;
-                    LingleLogger.logInfo("Running in terminal, using sudo for authentication");
-                } else if (isPolkitAgentAvailable()) {
+                // Prefer pkexec when a polkit agent is available (graphical password dialog)
+                // Fall back to sudo only if no polkit agent is running
+                if (isPolkitAgentAvailable()) {
                     useSudo = false;
                     LingleLogger.logInfo("Polkit agent detected, using pkexec for authentication");
-                } else {
+                } else if (isSudoAvailable()) {
                     useSudo = true;
                     LingleLogger.logInfo("No polkit agent detected, using sudo for authentication");
                     System.out.println("\n[Lingle] No polkit agent detected. Authenticating with sudo...");
+                } else {
+                    throw new IOException("No authentication method available (neither polkit agent nor sudo found)");
                 }
             }
 
@@ -323,16 +322,17 @@ public class ElevatedInstaller {
 
         // Determine elevation method if not already done
         if (useSudo == null) {
-            if (isRunningInTerminal() && isSudoAvailable()) {
-                useSudo = true;
-                LingleLogger.logInfo("Running in terminal, using sudo for authentication");
-            } else if (isPolkitAgentAvailable()) {
+            // Prefer pkexec when a polkit agent is available (graphical password dialog)
+            // Fall back to sudo only if no polkit agent is running
+            if (isPolkitAgentAvailable()) {
                 useSudo = false;
                 LingleLogger.logInfo("Polkit agent detected, using pkexec for authentication");
-            } else {
+            } else if (isSudoAvailable()) {
                 useSudo = true;
                 LingleLogger.logInfo("No polkit agent detected, using sudo for authentication");
                 System.out.println("\n[Lingle] No polkit agent detected. You will be prompted for your password.");
+            } else {
+                throw new IOException("No authentication method available (neither polkit agent nor sudo found)");
             }
         }
 
